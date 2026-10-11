@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenHiking style for MapLibre</title>
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css">
+<style>
+  html, body, #map { height: 100%; margin: 0; }
+  #panel {
+    position: absolute; top: 10px; left: 10px; z-index: 1;
+    padding: 8px 10px; border-radius: 4px; background: rgba(255, 255, 255, 0.92);
+    font: 13px/1.6 system-ui, sans-serif; box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.1);
+  }
+  #panel summary { cursor: pointer; font-weight: 600; user-select: none; }
+  #panel[open] summary { margin-bottom: 4px; }
+  #panel label { display: block; cursor: pointer; }
+  #panel hr { border: 0; border-top: 1px solid rgba(128, 128, 128, 0.35); margin: 5px 0; }
+  #panel small { color: #555; }
+  body.dark #panel { background: rgba(30, 32, 34, 0.92); color: #e8e8e6; box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.12); }
+  body.dark #panel small { color: #a5a5a2; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<details id="panel" open>
+  <summary>Map options</summary>
+  <label><input type="checkbox" id="dark"> Dark mode</label>
+  <hr>
+  <label><input type="checkbox" id="hillshade" checked> Hillshading</label>
+  <label><input type="checkbox" id="contours" checked> Contours</label>
+  <hr>
+  <small>Marked routes (Waymarked Trails)</small>
+  <label><input type="checkbox" id="hiking" checked> Hiking</label>
+  <label><input type="checkbox" id="cycling"> Cycling</label>
+  <label><input type="checkbox" id="mtb"> Mountain bike</label>
+</details>
+<script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
+<script src="https://unpkg.com/maplibre-contour@0.1.1/dist/index.min.js"></script>
+<script>
+(async () => {
+  // Everything on this page comes from public services: the map data from
+  // OpenFreeMap, elevation from Mapterhorn, and the marked routes from
+  // Waymarked Trails. The page itself is static files only.
+  //
+  // The theme is kept in the URL (?theme=dark or ?theme=light); without it the
+  // system setting decides. Switching reloads the page; the map position is in
+  // the URL hash and survives that.
+  const params = new URLSearchParams(location.search);
+  const dark = params.has('theme')
+    ? params.get('theme') === 'dark'
+    : window.matchMedia('(prefers-color-scheme: dark)').matches;
+  document.body.classList.toggle('dark', dark);
+  const $ = (id) => document.getElementById(id);
+  // The menu starts collapsed on a small screen, where it would cover much of
+  // the map. Opening or closing it is remembered for the next visit.
+  const saved = localStorage.getItem('menu');
+  $('panel').open = saved ? saved === 'open' : window.innerWidth >= 600;
+  $('panel').addEventListener('toggle', () => localStorage.setItem('menu', $('panel').open ? 'open' : 'closed'));
+  $('dark').checked = dark;
+  $('dark').addEventListener('change', () => {
+    params.set('theme', $('dark').checked ? 'dark' : 'light');
+    location.search = params.toString();
+  });
+
+  // Colors of the layers this page adds on top of the style, per theme.
+  const extra = dark ? {
+    shadow: '#000000', highlight: 'rgba(255,255,255,0.35)', accent: '#000000',
+    contourMinor: 'rgba(190,140,120,0.45)', contourMedium: '#8f7350', contourMajor: '#b89c5a',
+    contourText: '#d0a595', contourHalo: '#14161a',
+  } : {
+    shadow: '#3d3a2e', highlight: '#ffffff', accent: '#5a5540',
+    contourMinor: 'rgba(219,136,136,0.8)', contourMedium: '#BD956A', contourMajor: '#7B6520',
+    contourText: '#A86868', contourHalo: '#ffffff',
+  };
+
+  const style = await (await fetch(dark ? 'openhiking-dark.json' : 'openhiking.json')).json();
+  // The style keeps a relative sprite path; MapLibre needs an absolute URL.
+  style.sprite = new URL(style.sprite, location.href).href;
+
+  // The look of the map is OpenHiking's; the tile sources add their own credits.
+  const openhiking = 'Style: <a href="https://github.com/openhiking/openhiking-mapsforge">OpenHiking</a> (GPL-3.0)';
+  const map = new maplibregl.Map({
+    container: 'map', style, center: [18.898, 47.722], zoom: 13, maxZoom: 19, hash: true, // Dobogókő, Pilis
+    attributionControl: { customAttribution: openhiking },
+  });
+  map.addControl(new maplibregl.NavigationControl());
+  map.addControl(new maplibregl.ScaleControl({ unit: 'metric' }));
+  map.addControl(new maplibregl.GeolocateControl({ trackUserLocation: true }));
+
+  // OpenFreeMap has no elevation data. Hillshading and contour lines are
+  // computed in the browser from Mapterhorn terrain tiles (maplibre-contour).
+  const dem = new mlcontour.DemSource({
+    url: 'https://tiles.mapterhorn.com/{z}/{x}/{y}.webp', encoding: 'terrarium', maxzoom: 12, worker: true,
+  });
+  dem.setupMaplibre(maplibregl);
+  const mapterhorn = '<a href="https://mapterhorn.com/attribution">© Mapterhorn</a>';
+
+  map.on('load', () => {
+    // Hillshading sits above the land cover fills and below water, roads, and labels.
+    map.addSource('dem', { type: 'raster-dem', tiles: [dem.sharedDemProtocolUrl], tileSize: 512,
+      encoding: 'terrarium', maxzoom: 12, attribution: mapterhorn });
+    map.addLayer({ id: 'hillshade', type: 'hillshade', source: 'dem', paint: {
+      'hillshade-exaggeration': ['interpolate', ['linear'], ['zoom'], 6, 0.25, 12, 0.4, 16, 0.3],
+      'hillshade-shadow-color': extra.shadow, 'hillshade-highlight-color': extra.highlight,
+      'hillshade-accent-color': extra.accent,
+    } }, 'water-ocean');
+
+    map.addSource('contours', {
+      type: 'vector',
+      tiles: [dem.contourProtocolUrl({
+        thresholds: { 9: [100, 100], 10: [50, 100], 13: [10, 100] }, // zoom: [minor, major] interval in meters
+        elevationKey: 'ele', levelKey: 'level', contourLayer: 'contours',
+      })],
+      maxzoom: 15,
+      attribution: mapterhorn,
+    });
+    const major = ['==', ['get', 'level'], 1];
+    const medium = ['all', ['==', ['get', 'level'], 0], ['==', ['%', ['get', 'ele'], 50], 0]];
+    const minor = ['all', ['==', ['get', 'level'], 0], ['!=', ['%', ['get', 'ele'], 50], 0]];
+    const contourLayers = [
+      { id: 'contour-minor', minzoom: 13, filter: minor,
+        paint: { 'line-color': extra.contourMinor, 'line-width': 0.3 } },
+      { id: 'contour-medium', minzoom: 10, filter: medium,
+        paint: { 'line-color': extra.contourMedium, 'line-width': ['step', ['zoom'], 0.3, 12, 0.5] } },
+      { id: 'contour-major', minzoom: 9, filter: major,
+        paint: { 'line-color': extra.contourMajor, 'line-width': ['step', ['zoom'], 0.45, 12, 0.7] } },
+    ];
+    for (const layer of contourLayers) {
+      map.addLayer({ type: 'line', source: 'contours', 'source-layer': 'contours', ...layer }, 'waterway-river');
+    }
+    map.addLayer({
+      id: 'contour-label', type: 'symbol', source: 'contours', 'source-layer': 'contours',
+      minzoom: 12, filter: ['any', major, ['all', medium, ['>=', ['zoom'], 15]]],
+      layout: {
+        'symbol-placement': 'line', 'symbol-spacing': 250, 'text-field': ['to-string', ['get', 'ele']],
+        'text-font': ['Noto Sans Bold'], 'text-size': ['step', ['zoom'], 8, 15, 9, 16, 10],
+      },
+      paint: { 'text-color': extra.contourText, 'text-halo-color': extra.contourHalo, 'text-halo-width': 0.6 },
+    }, 'waterway-river-name');
+
+    // Marked routes. OpenFreeMap's tiles carry no usable trail data, so the
+    // routes are raster overlays from Waymarked Trails, one per kind of route,
+    // drawn above the roads and below the labels.
+    for (const kind of ['hiking', 'cycling', 'mtb']) {
+      map.addSource(kind, {
+        type: 'raster',
+        tiles: [`https://tile.waymarkedtrails.org/${kind}/{z}/{x}/{y}.png`],
+        tileSize: 256,
+        attribution: '<a href="https://waymarkedtrails.org">Waymarked Trails</a> (CC BY-SA)',
+      });
+      map.addLayer({ id: kind, type: 'raster', source: kind,
+        paint: { 'raster-opacity': dark ? 0.9 : 0.75 } }, 'road-name-path');
+    }
+
+    const toggle = (id, layers) => {
+      const apply = () => layers.forEach((layer) =>
+        map.setLayoutProperty(layer, 'visibility', $(id).checked ? 'visible' : 'none'));
+      $(id).addEventListener('change', apply);
+      apply();
+    };
+    toggle('hillshade', ['hillshade']);
+    toggle('contours', [...contourLayers.map((l) => l.id), 'contour-label']);
+    toggle('hiking', ['hiking']);
+    toggle('cycling', ['cycling']);
+    toggle('mtb', ['mtb']);
+  });
+})();
+</script>
+</body>
+</html>
